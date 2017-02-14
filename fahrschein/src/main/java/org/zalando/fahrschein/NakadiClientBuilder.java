@@ -6,7 +6,6 @@ import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import javax.annotation.Nullable;
 import java.net.URI;
 
-import static java.util.Optional.ofNullable;
 import static org.zalando.fahrschein.Preconditions.checkNotNull;
 
 public final class NakadiClientBuilder {
@@ -58,8 +57,8 @@ public final class NakadiClientBuilder {
     }
 
     public NakadiClient build() {
-        final ClientHttpRequestFactory clientHttpRequestFactory = ofNullable(this.clientHttpRequestFactory).orElseGet(this::defaultClientHttpRequestFactory);
-        final CursorManager cursorManager = ofNullable(this.cursorManager).orElseGet(() -> new ManagedCursorManager(baseUri, clientHttpRequestFactory));
+        final ClientHttpRequestFactory clientHttpRequestFactory = this.clientHttpRequestFactory != null ? this.clientHttpRequestFactory : defaultClientHttpRequestFactory();
+        final CursorManager cursorManager = this.cursorManager != null ? this.cursorManager : new ManagedCursorManager(baseUri, clientHttpRequestFactory);
 
         return new NakadiClient(baseUri, clientHttpRequestFactory, cursorManager);
     }

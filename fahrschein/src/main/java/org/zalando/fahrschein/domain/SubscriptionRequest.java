@@ -3,10 +3,10 @@ package org.zalando.fahrschein.domain;
 import com.fasterxml.jackson.annotation.JsonValue;
 
 import javax.annotation.concurrent.Immutable;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
 
-import static java.util.Collections.emptySet;
 import static java.util.Collections.unmodifiableSet;
 
 @Immutable
@@ -35,7 +35,7 @@ public class SubscriptionRequest {
 
     public SubscriptionRequest(String owningApplication, Set<String> eventTypes, String consumerGroup, Position readFrom) {
         this.owningApplication = owningApplication;
-        this.eventTypes = unmodifiableSet(eventTypes == null ? emptySet() : new HashSet<>(eventTypes));
+        this.eventTypes = unmodifiableSet(eventTypes == null ? Collections.<String>emptySet() : new HashSet<>(eventTypes));
         this.consumerGroup = consumerGroup;
         this.readFrom = readFrom;
     }

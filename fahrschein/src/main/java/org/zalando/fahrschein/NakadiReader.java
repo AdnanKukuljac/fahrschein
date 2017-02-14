@@ -4,7 +4,6 @@ import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.ObjectWriter;
@@ -21,6 +20,7 @@ import org.zalando.fahrschein.domain.Lock;
 import org.zalando.fahrschein.domain.Partition;
 import org.zalando.fahrschein.domain.Subscription;
 
+import javax.annotation.Nullable;
 import java.io.Closeable;
 import java.io.EOFException;
 import java.io.IOException;
@@ -29,14 +29,12 @@ import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
-import java.util.stream.Collectors;
 
 import static java.util.Collections.singletonList;
-import static java.util.stream.Collectors.toList;
 import static org.zalando.fahrschein.Preconditions.checkState;
 
 class NakadiReader<T> implements IORunnable {
@@ -51,8 +49,10 @@ class NakadiReader<T> implements IORunnable {
     private final CursorManager cursorManager;
 
     private final String eventName;
-    private final Optional<Subscription> subscription;
-    private final Optional<Lock> lock;
+    @Nullable
+    private final Subscription subscription;
+    @Nullable
+    private final Lock lock;
     private final Class<T> eventClass;
     private final Listener<T> listener;
 
@@ -62,8 +62,8 @@ class NakadiReader<T> implements IORunnable {
 
     private final MetricsCollector metricsCollector;
 
-    NakadiReader(URI uri, ClientHttpRequestFactory clientHttpRequestFactory, BackoffStrategy backoffStrategy, CursorManager cursorManager, ObjectMapper objectMapper, String eventName, Optional<Subscription> subscription, Optional<Lock> lock, Class<T> eventClass, Listener<T> listener, final MetricsCollector metricsCollector) {
-        checkState(!subscription.isPresent() || (subscription.get().getEventTypes().size() == 1 && eventName.equals(subscription.get().getEventTypes().iterator().next())), "Only subscriptions to single event types are currently supported");
+    NakadiReader(URI uri, ClientHttpRequestFactory clientHttpRequestFactory, BackoffStrategy backoffStrategy, CursorManager cursorManager, ObjectMapper objectMapper, String eventName, @Nullable Subscription subscription, @Nullable Lock lock, Class<T> eventClass, Listener<T> listener, final MetricsCollector metricsCollector) {
+        checkState(subscription == null || (subscription.getEventTypes().size() == 1 && eventName.equals(subscription.getEventTypes().iterator().next())), "Only subscriptions to single event types are currently supported");
 
         this.uri = uri;
         this.clientHttpRequestFactory = clientHttpRequestFactory;
@@ -122,21 +122,36 @@ class NakadiReader<T> implements IORunnable {
         }
     }
 
-    private static Optional<String> getStreamId(ClientHttpResponse response) {
+    @Nullable
+    private static String getStreamId(ClientHttpResponse response) {
         final HttpHeaders headers = response.getHeaders();
-        final String streamId = headers == null ? null : headers.getFirst("X-Nakadi-StreamId");
-        return Optional.ofNullable(streamId);
+        return headers == null ? null : headers.getFirst("X-Nakadi-StreamId");
+    }
+
+    private static Collection<Cursor> getLockedCursors(Collection<Cursor> cursors, List<Partition> partitions) {
+        final Map<String, String> offsetsByPartition = new HashMap<>();
+        for (Cursor cursor : cursors) {
+            offsetsByPartition.put(cursor.getPartition(), cursor.getOffset());
+        }
+
+        Collection<Cursor> lockedCursors = new ArrayList<>(partitions.size());
+        for (Partition partition : partitions) {
+            final String offset = offsetsByPartition.get(partition.getPartition());
+            lockedCursors.add(new Cursor(partition.getPartition(), offset != null ? offset : "BEGIN"));
+        }
+
+        return lockedCursors;
     }
 
     private JsonInput openJsonInput() throws IOException {
         final ClientHttpRequest request = clientHttpRequestFactory.createRequest(uri, HttpMethod.GET);
-        if (!subscription.isPresent()) {
+        if (subscription == null) {
             final Collection<Cursor> cursors = cursorManager.getCursors(eventName);
             final Collection<Cursor> lockedCursors;
-            if (lock.isPresent()) {
-                final Map<String, String> offsets = cursors.stream().collect(Collectors.toMap(Cursor::getPartition, Cursor::getOffset));
-                final List<Partition> partitions = lock.get().getPartitions();
-                lockedCursors = partitions.stream().map(partition -> new Cursor(partition.getPartition(), offsets.getOrDefault(partition.getPartition(), "BEGIN"))).collect(toList());
+            if (lock != null) {
+                final List<Partition> partitions = lock.getPartitions();
+
+                lockedCursors = getLockedCursors(cursors, partitions);
             } else {
                 lockedCursors = cursors;
             }
@@ -148,10 +163,10 @@ class NakadiReader<T> implements IORunnable {
         }
         final ClientHttpResponse response = request.execute();
         try {
-            final Optional<String> streamId = getStreamId(response);
+            final String streamId = getStreamId(response);
 
-            if (subscription.isPresent() && streamId.isPresent()) {
-                cursorManager.addStreamId(subscription.get(), streamId.get());
+            if (subscription != null && streamId != null) {
+                cursorManager.addStreamId(subscription, streamId);
             }
 
             return new JsonInput(jsonFactory, response);
@@ -237,9 +252,7 @@ class NakadiReader<T> implements IORunnable {
                 }
             } catch (RuntimeException e) {
                 final Throwable cause = e.getCause();
-                if (cause instanceof JsonMappingException) {
-                    listener.onMappingException((JsonMappingException) cause);
-                } else if (cause instanceof IOException) {
+                if (cause instanceof IOException) {
                     throw (IOException)cause;
                 } else {
                     throw e;
@@ -298,7 +311,12 @@ class NakadiReader<T> implements IORunnable {
 
                 try {
                     LOG.debug("Reconnecting after [{}] errors", errorCount);
-                    jsonInput = backoffStrategy.call(errorCount, e, this::openJsonInput);
+                    jsonInput = backoffStrategy.call(errorCount, e, new IOCallable<JsonInput>() {
+                        @Override
+                        public JsonInput call() throws IOException {
+                            return NakadiReader.this.openJsonInput();
+                        }
+                    });
                     LOG.info("Reconnected after [{}] errors", errorCount);
                     metricsCollector.markReconnection();
                 } catch (InterruptedException interruptedException) {
